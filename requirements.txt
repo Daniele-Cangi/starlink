@@ -1,0 +1,5 @@
+pyzmq
+numpy
+pymap3d
+scipy
+websockets

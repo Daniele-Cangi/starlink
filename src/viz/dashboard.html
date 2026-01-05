@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>SIS-PRO // TACTICAL MAP [LIVE]</title>
+    <meta charset="utf-8">
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+        }
+
+        #map {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        #hud {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 999;
+            background: rgba(0, 10, 20, 0.95);
+            border: 1px solid #005544;
+            color: #00ffcc;
+            padding: 15px;
+            width: 320px;
+            box-shadow: 0 0 20px rgba(0, 255, 204, 0.1);
+            backdrop-filter: blur(5px);
+        }
+
+        h3 {
+            margin: 0 0 10px 0;
+            font-size: 16px;
+            border-bottom: 1px solid #005544;
+            padding-bottom: 5px;
+            letter-spacing: 2px;
+        }
+
+        .stat-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+            font-size: 12px;
+        }
+
+        .value {
+            font-weight: bold;
+            color: #fff;
+        }
+
+        .blink {
+            animation: blinker 0.5s step-end infinite alternate;
+            color: #ff3333;
+            font-weight: bold;
+        }
+
+        @keyframes blinker {
+            50% {
+                opacity: 0;
+            }
+        }
+
+        #log {
+            font-size: 10px;
+            height: 150px;
+            overflow-y: auto;
+            opacity: 0.8;
+            margin-top: 15px;
+            border-top: 1px solid #005544;
+            padding-top: 5px;
+            color: #aaa;
+        }
+
+        .log-entry {
+            margin-bottom: 2px;
+            border-bottom: 1px solid #112222;
+        }
+    </style>
+
+    <!-- Dependencies (Deck.gl, MapLibre - No Token Required) -->
+    <script src="https://unpkg.com/deck.gl@latest/dist.min.js"></script>
+    <script src="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.js"></script>
+    <link href="https://unpkg.com/maplibre-gl@3.6.2/dist/maplibre-gl.css" rel="stylesheet" />
+</head>
+
+<body>
+
+    <div id="hud">
+        <h3>SIS-PRO // C2 NODE [LIVE]</h3>
+        <div class="stat-row"><span>SYSTEM STATUS:</span> <span id="sys-status" class="value" style="color:#0f0">WAITING
+                LINK</span></div>
+        <div class="stat-row"><span>ACTIVE SENSORS:</span> <span id="sensor-count" class="value">0</span></div>
+        <div class="stat-row"><span>TARGET LOCKS:</span> <span id="target-count" class="value">0</span></div>
+        <div class="stat-row"><span>CONFIDENCE:</span> <span id="fix-accuracy" class="value">--</span></div>
+        <div class="stat-row"><span>LATEST GEO:</span> <span id="fix-coords" class="value">--.--, --.--</span></div>
+        <div id="log"></div>
+    </div>
+
+    <div id="map"></div>
+
+    <script type="text/javascript">
+        // CONFIGURATION
+        const WS_URL = 'ws://localhost:8765';
+        const TARGET_TTL_MS = 5000; // Target svanisce dopo 5 secondi senza aggiornamenti
+
+        // SENSORS (In produzione dovrebbero arrivare via WS all'handshake iniziale)
+        // Per ora li manteniamo statici come ancore geografiche note.
+        const SENSORS = {
+            "ALPHA_01": [12.4964, 41.9028],
+            "BETA_02": [12.6000, 41.8000],
+            "GAMMA_03": [12.3000, 42.0000]
+        };
+
+        // STATE
+        let signalLines = [];
+        let targets = []; // { id, pos, timestamp, cost }
+        let lastFixTime = 0;
+
+        // DECKGL LAYERS
+        const { DeckGL, ScatterplotLayer, LineLayer, TextLayer } = deck;
+
+        const deckgl = new DeckGL({
+            container: 'map',
+            map: maplibregl,
+            mapStyle: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+            initialViewState: {
+                longitude: 12.50,
+                latitude: 41.85,
+                zoom: 11,
+                pitch: 60,
+                bearing: 20
+            },
+            controller: true,
+            layers: []
+        });
+
+        function renderLayers() {
+            const currentTime = Date.now();
+
+            // 1. Rimuovi target vecchi (Ghosting)
+            targets = targets.filter(t => currentTime - t.timestamp < TARGET_TTL_MS);
+
+            // 2. Aggiorna HUD se nessun target
+            if (targets.length === 0 && document.getElementById('target-count').innerText !== "0") {
+                document.getElementById('target-count').innerText = "0";
+                document.getElementById('target-count').className = "value";
+                document.getElementById('fix-coords').innerText = "--.--, --.--";
+            }
+
+            const layers = [
+                // LAYER SENSORI (Blu/Verde statico)
+                new ScatterplotLayer({
+                    id: 'sensors',
+                    data: Object.keys(SENSORS).map(k => ({ pos: SENSORS[k], id: k })),
+                    getPosition: d => d.pos,
+                    getFillColor: [0, 255, 204],
+                    getRadius: 200,
+                    radiusMinPixels: 3,
+                    pickable: true
+                }),
+
+                // LAYER TARGET (Rosso pulsante)
+                new ScatterplotLayer({
+                    id: 'targets',
+                    data: targets,
+                    getPosition: d => d.pos,
+                    getFillColor: [255, 0, 0, 200],
+                    getLineColor: [255, 255, 255],
+                    getLineWidth: 2,
+                    stroked: true,
+                    getRadius: d => Math.max(50, 500 * d.cost), // Raggio inversamente prop alla precisione? No, qui usiamo cost come errore. Più errore = più grande.
+                    radiusMinPixels: 5,
+                    radiusMaxPixels: 100
+                }),
+
+                // LAYER LINEE ATTIVITA' (TDOA Vectors)
+                new LineLayer({
+                    id: 'signals',
+                    data: signalLines,
+                    getSourcePosition: d => d.from,
+                    getTargetPosition: d => d.to,
+                    getColor: [255, 50, 50, 100], // Rosso tenue
+                    getWidth: 2,
+                    widthMinPixels: 1
+                }),
+
+                // LAYER ETICHETTE
+                new TextLayer({
+                    id: 'sensor-labels',
+                    data: Object.keys(SENSORS).map(k => ({ pos: SENSORS[k], id: k })),
+                    getPosition: d => d.pos,
+                    getText: d => d.id,
+                    getSize: 12,
+                    getColor: [0, 255, 204],
+                    getPixelOffset: [0, -20]
+                })
+            ];
+
+            deckgl.setProps({ layers });
+
+            // Loop animazione se ci sono elementi attivi
+            if (targets.length > 0 || signalLines.length > 0) {
+                requestAnimationFrame(renderLayers);
+            }
+        }
+
+        // WEBSOCKET LOGIC
+        let socket;
+
+        function connect() {
+            socket = new WebSocket(WS_URL);
+
+            socket.onopen = () => {
+                log("UPLINK ESTABLISHED");
+                document.getElementById('sys-status').innerText = "CONNECTED";
+                document.getElementById('sys-status').style.color = "#00ffcc";
+                document.getElementById('sensor-count').innerText = Object.keys(SENSORS).length;
+            };
+
+            socket.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+
+                    // 1. GESTIONE TARGET FIX (Dal Solver)
+                    // Questo è il dato reale calcolato dal C2 Engine
+                    if (data.type === 'TARGET_FIX' || (data.lat && data.lon)) { // Fallback compatibilità
+
+                        const newTarget = {
+                            pos: [data.lon, data.lat],
+                            timestamp: Date.now(),
+                            cost: data.error_cost || 0.5,
+                            id: 'TGT-01' // In futuro supportare multi-target ID
+                        };
+
+                        targets = [newTarget]; // Per ora tracking singolo (LATEST)
+                        lastFixTime = Date.now();
+
+                        // Aggiorna HUD
+                        document.getElementById('target-count').innerText = "LOCKED";
+                        document.getElementById('target-count').className = "blink";
+                        document.getElementById('fix-coords').innerText = `${data.lat.toFixed(5)}, ${data.lon.toFixed(5)}`;
+                        document.getElementById('fix-accuracy').innerText = (1.0 / (data.error_cost || 1)).toFixed(2);
+
+                        log(`FIX ACQUIRED: ${data.lat.toFixed(4)}, ${data.lon.toFixed(4)}`);
+                        renderLayers();
+                    }
+
+                    // 2. GESTIONE TDOA PING (Dai Sensori Raw)
+                    // Visualizza solo l'attività del sensore.
+                    // Disegna linea SOLO se abbiamo un target attivo verso cui puntare.
+                    if (data.type === 'TDOA_PING') {
+                        const sensorPos = SENSORS[data.node_id];
+
+                        if (sensorPos) {
+                            let targetPos = null;
+
+                            // Se abbiamo un fix recente (< 2 sec), le linee convergono lì
+                            if (targets.length > 0 && (Date.now() - targets[0].timestamp < 2000)) {
+                                targetPos = targets[0].pos;
+                            } else {
+                                // Altrimenti disegna solo un flash locale o una linea corta direzionale (se avessimo AoA)
+                                // Qui facciamo un "pulse" visivo aggiungendo una linea che svanisce subito
+                                // o semplicemente non disegnando la linea se non c'è lock.
+                                // DECISIONE: Disegna verso il centro mappa se searching, o nulla.
+                                // Facciamo nulla per pulizia, solo log.
+                            }
+
+                            if (targetPos) {
+                                const flash = {
+                                    from: sensorPos,
+                                    to: targetPos,
+                                    timestamp: Date.now()
+                                };
+                                signalLines.push(flash);
+                            }
+
+                            // Pulizia linee vecchie
+                            signalLines = signalLines.filter(l => Date.now() - l.timestamp < 150);
+                            renderLayers();
+                        }
+                    }
+                } catch (e) {
+                    console.error("Data parse error", e);
+                }
+            };
+
+            socket.onclose = () => {
+                log("UPLINK LOST - RETRYING...");
+                document.getElementById('sys-status').innerText = "OFFLINE";
+                document.getElementById('sys-status').style.color = "#ff3333";
+                setTimeout(connect, 2000);
+            };
+
+            socket.onerror = (err) => {
+                console.error("Socket error", err);
+            };
+        }
+
+        function log(msg) {
+            const el = document.getElementById('log');
+            const line = document.createElement('div');
+            line.className = 'log-entry';
+
+            const time = new Date().toISOString().split('T')[1].split('.')[0];
+            line.innerText = `[${time}] ${msg}`;
+
+            el.prepend(line);
+            if (el.children.length > 20) el.removeChild(el.lastChild);
+        }
+
+        // Start
+        connect();
+
+        // Avvia loop di rendering per gestire le animazioni/fade-out
+        setInterval(() => {
+            if (targets.length > 0 || signalLines.length > 0) {
+                renderLayers();
+            }
+        }, 100);
+
+    </script>
+</body>
+
+</html>

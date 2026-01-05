@@ -1,0 +1,27 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env
+
+# C++ / Build
+build/
+bin/
+*.exe
+*.dll
+*.so
+*.dylib
+*.o
+*.obj
+
+# VS Code / IDE
+.vscode/
+.idea/
+
+# System
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
