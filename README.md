@@ -7,8 +7,11 @@
 Instead of decrypting the payload (impossible), this system inverts the logic: **"What is the satellite looking at?"**
 By combining **Distributed TDOA (Time Difference of Arrival)** with **GPU-accelerated Dwell Time Detection**, we can triangulate sectors receiving prioritized bandwidth (VIP Targets) with <100m precision.
 
+<img width="1918" height="911" alt="Screenshot 2026-01-06 171124" src="https://github.com/user-attachments/assets/222ee92b-1eee-4a71-9a04-d3183053688f" />
+
 ## 🏗 Architecture
 The system is composed of 4 modules communicating via **ZeroMQ**:
+
 
 ### 1. The Predator Node (C++20 / CUDA)
 *   **Role**: Physical Layer & Signal Processing.
